@@ -188,6 +188,30 @@ func TestProbeDoesNotRecordTheDevice(t *testing.T) {
 	}
 }
 
+// Found live: a probe push registered a capability-less device and shut the
+// gate for both real machines.
+func TestProbePushDoesNotRecordTheDevice(t *testing.T) {
+	srv, st := newTestServer(t)
+	contentKinds(t, srv, withDevice("win", quarantineCap))
+	w := request(t, srv, http.MethodPost, "/v1/sync/ops", pushBody(t), func(r *http.Request) {
+		withDevice("probe", "")(r)
+		r.Header.Set(ProbeHeader, "1")
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("push = %d", w.Code)
+	}
+	devices, err := st.ListDevices(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 {
+		t.Fatalf("probe push recorded a device: %+v", devices)
+	}
+	if !has(contentKinds(t, srv, withDevice("win", quarantineCap)), "work_state") {
+		t.Fatal("gate closed by a probe push")
+	}
+}
+
 // work_state is accepted, acked, stored, and served back byte for byte, like
 // the launch kinds.
 func TestWorkStateRoundTrip(t *testing.T) {

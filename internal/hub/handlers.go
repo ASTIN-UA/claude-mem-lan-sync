@@ -95,8 +95,14 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		ops = append(ops, op)
 	}
 
-	res, err := s.st.Push(r.Context(), ops,
-		r.Header.Get("X-Device-Id"), r.Header.Get("X-Device-Name"))
+	// Push records the device too. A diagnostic probe must not: a device row
+	// without capabilities closes the work_state gate for everyone. authed has
+	// already checked revocation, so the store needs no id for that.
+	recordAs := r.Header.Get("X-Device-Id")
+	if r.Header.Get(ProbeHeader) != "" {
+		recordAs = ""
+	}
+	res, err := s.st.Push(r.Context(), ops, recordAs, r.Header.Get("X-Device-Name"))
 	if err != nil {
 		if reason := proto.ReasonOf(err); reason == proto.ReasonUnauthorized {
 			s.writeError(w, http.StatusUnauthorized, reason)
