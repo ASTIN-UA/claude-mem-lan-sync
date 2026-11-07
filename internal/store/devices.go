@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -18,7 +19,16 @@ type Device struct {
 	FirstSeen time.Time
 	LastSeen  time.Time
 	Revoked   bool
+	// Capabilities is the device's last X-Sync-Capabilities value; empty when
+	// it has never sent one.
+	Capabilities string
 }
+
+// CapabilityQuarantineUnknownKinds is what claude-mem 13.29.0 and later send in
+// X-Sync-Capabilities: a pulled op of a kind it does not know is set aside and
+// the cursor moves past it. Older builds throw on the whole page instead and
+// retry it forever, so a kind they do not know must never reach them.
+const CapabilityQuarantineUnknownKinds = "quarantine-unknown-kinds"
 
 // upsertDevice records that a device is active.
 //
@@ -45,8 +55,11 @@ func (s *Store) upsertDevice(ctx context.Context, tx *sql.Tx, deviceID, deviceNa
 }
 
 // SeenDevice records a device outside a push, so a device that only ever pulls
-// still shows up in `cmemlan devices`.
-func (s *Store) SeenDevice(ctx context.Context, deviceID, deviceName string) error {
+// still shows up in `cmemlan devices`, together with the capabilities it sent
+// on this request. Every claude-mem request carries the header when the build
+// has any, so an absent header means an older build and is stored as NULL:
+// downgrading a machine closes the work_state gate again.
+func (s *Store) SeenDevice(ctx context.Context, deviceID, deviceName, capabilities string) error {
 	if deviceID == "" {
 		return nil
 	}
@@ -63,7 +76,55 @@ func (s *Store) SeenDevice(ctx context.Context, deviceID, deviceName string) err
 	if err := s.upsertDevice(ctx, tx, deviceID, deviceName, s.now().UnixMilli()); err != nil {
 		return err
 	}
+	if len(capabilities) > maxCapabilitiesLen {
+		capabilities = capabilities[:maxCapabilitiesLen]
+	}
+	var caps any
+	if capabilities != "" {
+		caps = capabilities
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE devices SET capabilities = ? WHERE user_id = ? AND device_id = ?`,
+		caps, s.userID, deviceID); err != nil {
+		return fmt.Errorf("store: recording device capabilities: %w", err)
+	}
 	return tx.Commit()
+}
+
+const maxCapabilitiesLen = 512
+
+// HasCapability reports whether a comma-separated capability list names one.
+func HasCapability(list, capability string) bool {
+	for _, c := range strings.Split(list, ",") {
+		if strings.TrimSpace(c) == capability {
+			return true
+		}
+	}
+	return false
+}
+
+// AllActiveDevicesHave reports whether every device that is not revoked and was
+// seen at or after since declared the capability. It is false when there is no
+// such device at all, so an empty hub never opens a gate by default.
+//
+// laggards lists the active devices that did not declare it, for doctor and the
+// log, so a user can see which machine still needs an update.
+func (s *Store) AllActiveDevicesHave(ctx context.Context, capability string, since time.Time) (ok bool, laggards []Device, err error) {
+	devices, err := s.ListDevices(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	active := 0
+	for _, d := range devices {
+		if d.Revoked || d.LastSeen.Before(since) {
+			continue
+		}
+		active++
+		if !HasCapability(d.Capabilities, capability) {
+			laggards = append(laggards, d)
+		}
+	}
+	return active > 0 && len(laggards) == 0, laggards, nil
 }
 
 func (s *Store) deviceRevoked(ctx context.Context, deviceID string) (bool, error) {
@@ -93,7 +154,8 @@ func (s *Store) DeviceRevoked(ctx context.Context, deviceID string) (bool, error
 // ListDevices returns every device the hub has seen.
 func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	rows, err := s.r.QueryContext(ctx, `
-		SELECT device_id, COALESCE(device_name, ''), first_seen, last_seen, revoked_at
+		SELECT device_id, COALESCE(device_name, ''), first_seen, last_seen, revoked_at,
+			COALESCE(capabilities, '')
 		FROM devices WHERE user_id = ?
 		ORDER BY last_seen DESC`, s.userID)
 	if err != nil {
@@ -106,7 +168,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 		var d Device
 		var first, last int64
 		var revoked sql.NullInt64
-		if err := rows.Scan(&d.ID, &d.Name, &first, &last, &revoked); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &first, &last, &revoked, &d.Capabilities); err != nil {
 			return nil, err
 		}
 		d.FirstSeen = time.UnixMilli(first)

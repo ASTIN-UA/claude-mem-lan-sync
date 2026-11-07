@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/andrhamm/claude-mem-lan-sync/internal/proto"
+	"github.com/andrhamm/claude-mem-lan-sync/internal/store"
 )
 
 // writeJSON sends a pre-rendered body with an explicit length.
@@ -26,8 +27,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, proto.ReasonInternal)
 		return
 	}
-	s.recordDevice(r)
-
 	var buf bytes.Buffer
 	buf.WriteString(`{"protocol_version":2,"epoch":"`)
 	buf.WriteString(s.st.Epoch().String())
@@ -37,7 +36,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// /ops rejects head > projected, so equality is the only value satisfying both.
 	buf.WriteString(`","projected_seq":"`)
 	buf.WriteString(head.String())
-	buf.WriteString(`"}`)
+	// content_kinds: the client pushes work_state only to a hub that lists it
+	// (CloudSync.hubAcceptsKind) and re-reads this hourly while it waits.
+	buf.WriteString(`","content_kinds":[`)
+	for i, k := range s.contentKinds(r) {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString(`"` + k + `"`)
+	}
+	buf.WriteString(`]}`)
 
 	s.writeJSON(w, &buf)
 }
@@ -158,7 +166,6 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, proto.ReasonInternal)
 		return
 	}
-	s.recordDevice(r)
 
 	var buf bytes.Buffer
 	buf.WriteString(`{"protocol_version":2,"epoch":"`)
@@ -193,16 +200,64 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, &buf)
 }
 
-// recordDevice notes a device that only ever pulls, so it still appears in
-// `cmemlan devices`. Failures are logged, never fatal to the request.
+// recordDevice notes every device that talks to the hub, so one that only ever
+// pulls still appears in `cmemlan devices`, and remembers the capabilities it
+// declared. Failures are logged, never fatal to the request.
 func (s *Server) recordDevice(r *http.Request) {
 	id := r.Header.Get("X-Device-Id")
 	if id == "" {
 		return
 	}
-	if err := s.st.SeenDevice(r.Context(), id, r.Header.Get("X-Device-Name")); err != nil {
+	if err := s.st.SeenDevice(r.Context(), id, r.Header.Get("X-Device-Name"),
+		r.Header.Get("X-Sync-Capabilities")); err != nil {
 		s.opts.Logger.Warn("recording device", "error", err)
 	}
+}
+
+// contentKinds is the content_kinds list for GET /v1/sync/status.
+//
+// work_state is listed only when it is safe for every device: claude-mem
+// before 13.29.0 throws on a pulled op of a kind it does not know and retries
+// that page forever. In auto mode the kind is therefore listed once every
+// active device declared quarantine-unknown-kinds, which is the rule the hosted
+// hub uses. A device that has been silent longer than ActiveDeviceWindow does
+// not hold the gate shut; if it returns on an old build it will stall on the
+// first work_state op, which doctor and the hub log point out.
+func (s *Server) contentKinds(r *http.Request) []string {
+	kinds := append([]string(nil), proto.LaunchContentKinds...)
+	switch s.opts.WorkState {
+	case WorkStateOn:
+		return append(kinds, proto.KindWorkState)
+	case WorkStateOff:
+		return kinds
+	}
+
+	since := s.opts.Now().Add(-s.opts.ActiveDeviceWindow)
+	ok, laggards, err := s.st.AllActiveDevicesHave(r.Context(), store.CapabilityQuarantineUnknownKinds, since)
+	if err != nil {
+		s.opts.Logger.Error("deciding the work_state gate", "error", err)
+		return kinds // closed is the safe answer
+	}
+	state := int32(1)
+	if ok {
+		state = 2
+	}
+	if prev := s.workStateOpen.Swap(state); prev != state {
+		if ok {
+			s.opts.Logger.Info("work_state enabled: every active device can set aside unknown kinds")
+		} else {
+			names := make([]string, 0, len(laggards))
+			for _, d := range laggards {
+				names = append(names, d.Name+" ("+d.ID+")")
+			}
+			s.opts.Logger.Info("work_state held back until these devices run claude-mem 13.29.0 or later",
+				"devices", names)
+		}
+	}
+	if ok {
+		kinds = append(kinds, proto.KindWorkState)
+	}
+	return kinds
 }
 
 func (s *Server) checkFreeSpace() error {

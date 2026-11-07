@@ -1,9 +1,11 @@
 # The claude-mem sync protocol
 
-Reverse-engineered from claude-mem **13.15.0** and verified end to end against a real worker. This
-is not a published specification; every claim here was checked against the client's own validators,
-and the ones marked **verified live** were additionally confirmed by driving a real worker against a
-hub.
+Reverse-engineered from claude-mem **13.15.0** and verified end to end against a real worker, then
+re-derived from the claude-mem **15.11.1** client source (`src/services/sync/CloudSync.ts`,
+`SyncClient.ts`, `CanonicalContent.ts`, `SyncConflictRecovery.ts`, `sync-capabilities.ts`) for the
+additions marked **15.x**. This is not a published specification; every claim here was checked
+against the client's own validators, and the ones marked **verified live** were additionally confirmed
+by driving a real worker against a hub.
 
 ## Endpoints
 
@@ -21,7 +23,16 @@ Authorization: Bearer <token>
 X-User-Id: <user id>
 X-Device-Id: <uuid the client mints>
 X-Device-Name: <display name>          (falls back to the hostname, so effectively always present)
+X-Sync-Capabilities: quarantine-unknown-kinds      (15.x; claude-mem 13.29.0 and later)
 ```
+
+**15.x — `X-Sync-Capabilities`.** Sent on every hub request (status, push, pull, realtime-token).
+`quarantine-unknown-kinds` means a pulled op of a kind this build does not know is set aside in
+`sync_pull_quarantine` and the cursor moves past it. A build without the header (13.17.2, for one)
+validates the kind inside the page decoder (`kind must be observation, summary, or prompt`), throws,
+and retries that page forever. The hub stores the header per device (`devices.capabilities`, schema
+v2) on every non-probe request; an absent header is stored as NULL, so downgrading a machine closes
+the gate below again.
 
 **Verified live**: the exact header set above, `limit=500` on every pull, and `since=0` on a first
 sync.
@@ -105,10 +116,39 @@ A hub must therefore replace rather than reject, or it will 400 a body the clien
 ## `GET /v1/sync/status`
 
 ```json
-{"protocol_version":2,"epoch":"1","head_seq":"402","projected_seq":"402"}
+{"protocol_version":2,"epoch":"1","head_seq":"402","projected_seq":"402",
+ "content_kinds":["observation","summary","prompt","work_state"]}
 ```
 
 `epoch` must be a **positive decimal string** within uint64 — a UUID is rejected outright.
+
+**15.x — `content_kinds`.** `CloudSync.runHubStatusProbe` keeps the string entries of an array and
+treats a missing or non-array field as `[]` ("a hub that predates `content_kinds` accepts only the
+launch kinds"). `hubAcceptsKind` always allows the three launch kinds and allows `work_state` only
+when it is listed; rows of an unlisted kind wait unsynced (`heldUnsupportedKind` in the worker's
+`/api/sync/status`) and the client re-reads the status hourly while any wait.
+
+The hub lists `work_state` the way the hosted hub does: once **every active device** declared
+`quarantine-unknown-kinds`. Active means not revoked and seen within `--active-device-days` (30). No
+active device at all keeps it unlisted. `serve --work-state on|off` overrides the rule. A request
+carrying `X-Cmemlan-Probe: 1` (cmemlan's own `doctor` and `status`) is answered normally but never
+recorded, so diagnostics cannot close the gate.
+
+## `work_state` operations (15.x)
+
+claude-mem's to-do lists and the shared "My Work" records (`work_state_entries`). Same twelve-key
+envelope and digests as every content kind (`ENVELOPE_KEYS` is unchanged from 13.x). Specifics:
+
+- `id` is `stableDocumentId("work_state", origin_device_id, origin_local_id)`:
+  `"work_state:" + sha256_base64url(canonicalJson(["cmem-doc-id-v1","device","work_state",<device>,<local id>]))`.
+- `origin_local_id` is the decimal row id; `entity_rev` the row's `sync_rev`.
+- `payload` has exactly `created_at`, `created_at_epoch` (decimal string), `fields` (an object whose
+  values are strings, finite numbers, booleans or null), `list_name`, `project`.
+- Rows whose `list_name` matches `__my_work_v<N>:*` are pushed only when the sending machine has
+  `CLAUDE_MEM_WORK_VIEW_SHARED_STATE=true`; other lists always sync once the hub lists the kind.
+
+The hub accepts `work_state` in `/v1/sync/ops` unconditionally, gate open or not: a push already in
+flight when the gate closes must land, because a 400 parks the op at the head of the outbox forever.
 
 ## `POST /v1/sync/ops`
 

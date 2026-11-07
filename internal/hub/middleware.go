@@ -95,6 +95,12 @@ func (s *Server) authed(w http.ResponseWriter, r *http.Request, method string, h
 		return
 	}
 
+	// Recorded before the handler runs, so a status request already counts the
+	// capabilities it carries when the work_state gate is decided.
+	if r.Header.Get(ProbeHeader) == "" {
+		s.recordDevice(r)
+	}
+
 	h(w, r)
 }
 

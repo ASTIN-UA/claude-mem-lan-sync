@@ -10,7 +10,7 @@ import (
 // A binary refuses to open a database stamped higher than this: an older build
 // silently misreading a newer schema is a corruption path, and this hub holds
 // the only copy of any op whose origin device has since pruned it.
-const schemaVersion = 1
+const schemaVersion = 2
 
 const schemaV1 = `
 CREATE TABLE ops (
@@ -45,6 +45,13 @@ CREATE TABLE devices (
 );
 `
 
+// schemaV2 remembers what each device declared in X-Sync-Capabilities. NULL
+// means it never declared anything, which is how claude-mem before 13.29.0
+// looks: such a device cannot set aside an op kind it does not know.
+const schemaV2 = `
+ALTER TABLE devices ADD COLUMN capabilities TEXT;
+`
+
 func migrate(db *sql.DB) error {
 	var current int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&current); err != nil {
@@ -69,6 +76,11 @@ func migrate(db *sql.DB) error {
 	if current < 1 {
 		if _, err := tx.Exec(schemaV1); err != nil {
 			return fmt.Errorf("store: applying schema v1: %w", err)
+		}
+	}
+	if current < 2 {
+		if _, err := tx.Exec(schemaV2); err != nil {
+			return fmt.Errorf("store: applying schema v2: %w", err)
 		}
 	}
 
