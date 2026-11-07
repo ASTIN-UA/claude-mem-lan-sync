@@ -193,7 +193,7 @@ func runDoctor(args []string, env Env) int {
 				detail: fmt.Sprintf("epoch %s, head %s", res.Epoch, res.HeadSeq),
 			})
 			if res.SyncMode == "poll" {
-				checks = append(checks, check{ok: true, label: "websocket disabled by the hub (expected)"})
+				checks = append(checks, check{ok: true, label: "13.x websocket disabled by the hub (expected; 15.x uses live updates)"})
 			}
 			if containsString(res.ContentKinds, "work_state") {
 				checks = append(checks, check{ok: true, label: "hub accepts work_state"})
