@@ -26,6 +26,7 @@ func TestWindowsTaskScriptCarriesPathsAndSupervision(t *testing.T) {
 		`-RestartCount 5`,
 		`-ExecutionTimeLimit ([TimeSpan]::Zero)`,
 		`$t.Delay = 'PT1M'`,
+		`New-ScheduledTaskTrigger -AtStartup`,
 		`-TaskName 'cmemlan-hub'`,
 		`IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`,
 	} {

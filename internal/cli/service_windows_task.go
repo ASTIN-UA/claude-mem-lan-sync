@@ -32,8 +32,9 @@ func windowsArgQuote(s string) string {
 //     Interactive task would open a console window for this console binary,
 //     and a hidden launcher (wscript) exits at once, leaving nothing to
 //     restart. S4U registration needs an elevated shell, so the script checks.
-//   - an at-logon trigger delayed one minute, so a bind to a fixed LAN address
-//     does not race DHCP or the network stack;
+//   - an at-startup trigger delayed one minute: S4U needs no session, so the
+//     hub serves the other machines before anyone signs in here, and the delay
+//     keeps a bind to a fixed LAN address from racing DHCP;
 //   - no execution time limit (the default stops a task after three days) and
 //     a restart every minute, five times, after a crash.
 //
@@ -59,7 +60,7 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIde
 if (-not $isAdmin) { throw 'Registering an S4U task needs an elevated (Administrator) PowerShell.' }
 
 $a = New-ScheduledTaskAction -Execute $exe -Argument $args -WorkingDirectory (Split-Path $exe)
-$t = New-ScheduledTaskTrigger -AtLogOn -User $user
+$t = New-ScheduledTaskTrigger -AtStartup
 $t.Delay = 'PT1M'
 $p = New-ScheduledTaskPrincipal -UserId $user -LogonType S4U -RunLevel Limited
 $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `+"`"+`
