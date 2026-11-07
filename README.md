@@ -1,5 +1,10 @@
 # claude-mem-lan-sync
 
+> **ASTIN-UA fork.** Brings the hub up to claude-mem **15.11.1**: the `work_state` kind (to-do lists
+> and "My Work"), live updates over the Realtime channel, conflict repair (`origin-repair-v1`),
+> Windows service install and the Windows fixes for `doctor`. See
+> [Upgrading to claude-mem 15.x](#upgrading-to-claude-mem-15x) and [docs/protocol.md](docs/protocol.md).
+
 Sync [claude-mem](https://github.com/thedotmack/claude-mem) memory between your own machines, over
 your own network. No accounts, no third-party service, nothing leaves your LAN.
 
@@ -96,13 +101,13 @@ anyone else who wants to implement it.
 
 | Command | What it does |
 |---|---|
-| `serve` | Run the hub. `--install-service` sets up systemd or launchd. |
+| `serve` | Run the hub. `--install-service` sets up systemd, launchd, or a Windows Scheduled Task. `--work-state auto\|on\|off` controls the work_state gate. |
 | `pair` | Open a five-minute pairing window, print a code and fingerprint. |
 | `connect [url]` | Point this machine's claude-mem at a hub. Discovers one over mDNS if no URL is given. |
 | `backfill` | Queue memories that predate sync. `--dry-run` first. `--undo` reverses it. |
 | `status` | Local queue, worker state, hub position. |
 | `doctor` | Diagnose why sync is not working. |
-| `devices` / `revoke` | See and remove paired devices. |
+| `devices` / `revoke` | See and remove paired devices, and whether each can receive work_state. |
 | `rotate-token` | Replace the key. Does not disturb existing memories. |
 
 ## Security posture
@@ -143,9 +148,43 @@ with data they receive.
 
 ## Compatibility
 
-Compatibility is derived from the observed behaviour of **claude-mem 13.15.0**, not from a published
-specification. `doctor` warns when your installed version differs from the tested one, and
-`docs/protocol.md` records what was verified and how.
+Compatibility is derived from the observed behaviour of **claude-mem 13.15.0** and the client source
+of **claude-mem 15.11.1**, not from a published specification. `doctor` warns when your installed
+version differs from the tested one, and `docs/protocol.md` records what was verified and how.
+
+| claude-mem | what syncs through this hub |
+|---|---|
+| 13.15 – 13.28 | observations, summaries, prompts, mutations; polling only |
+| 13.29 and later, 15.x | the above, plus `work_state` once every active device is on 13.29+; live updates; conflict repair |
+
+## Upgrading to claude-mem 15.x
+
+The hub, its key and every device's configuration stay as they are; nothing needs pairing again.
+
+**The hub machine.** Stop the hub, back up its data directory (`hub.db`, `hub.db-wal`,
+`hub.db-shm`, `psk`), replace the binary, start it again. The first start migrates `hub.db` to
+schema 2 in place (one added column and one added table; no op is rewritten). An older cmemlan
+refuses a schema-2 database, so keep the backup if you may roll back.
+
+**Every machine, including a Mac** (`~/.claude-mem/settings.json`):
+
+1. Update claude-mem to 15.11.1 the same way it was installed (Claude Code plugin update), then
+   restart the worker, for example by opening a new Claude Code session.
+2. Leave `CLAUDE_MEM_CLOUD_SYNC_HUB_URL`, `CLAUDE_MEM_CLOUD_SYNC_TOKEN`,
+   `CLAUDE_MEM_CLOUD_SYNC_USER_ID` and `CLAUDE_MEM_CLOUD_SYNC_DEVICE_ID` exactly as they are.
+3. Live updates: set `"CLAUDE_MEM_CLOUD_SYNC_WS": "true"` (older `cmemlan connect` wrote `"false"`).
+   Without it sync still works, by polling.
+4. "My Work" shared records (lists named `__my_work_v<N>:…`) leave a machine only with
+   `"CLAUDE_MEM_WORK_VIEW_SHARED_STATE": "true"`; ordinary to-do lists sync either way.
+5. Check: `curl -s http://127.0.0.1:37777/api/sync/status` should show `hub.contentKinds` with
+   `work_state`, `lastError: null`, `quarantine.count: 0`, `pullQuarantine.count: 0`, and
+   `pending.workState` falling to 0. `sync.mode` reads `realtime` once the live channel is up.
+
+**Until every machine is updated**, the hub keeps `work_state` out of `content_kinds`: a 13.x client
+before 13.29.0 would stall forever on the first work_state op it pulled. To-do lists queue locally
+meanwhile and upload by themselves once the last machine updates. `cmemlan devices` shows which
+machine still holds the gate; a machine silent for 30 days stops counting
+(`serve --active-device-days`), and `serve --work-state on` forces the kind on.
 
 This project is independent and is not affiliated with claude-mem or cmem.ai.
 
