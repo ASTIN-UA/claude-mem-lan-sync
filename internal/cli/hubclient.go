@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/andrhamm/claude-mem-lan-sync/internal/hub"
 )
 
 // httpHubClient talks to a hub over HTTP. Injected through Env so doctor and
@@ -20,13 +22,26 @@ func newHubClient() *httpHubClient {
 	return &httpHubClient{client: &http.Client{Timeout: 10 * time.Second}}
 }
 
-func (h *httpHubClient) Status(ctx context.Context, url, userID, token string) (StatusResult, error) {
+// ProbeDeviceID stands in for a device id that claude-mem has not minted yet.
+const ProbeDeviceID = "cmemlan-probe"
+
+func (h *httpHubClient) Status(ctx context.Context, url, userID, token, deviceID string) (StatusResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(url, "/")+"/v1/sync/status", nil)
 	if err != nil {
 		return StatusResult{}, err
 	}
+	if deviceID == "" {
+		deviceID = ProbeDeviceID
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-User-Id", userID)
+	// The hub refuses a request without a device id before it looks at the key,
+	// so leaving it out made doctor report HTTP 400 against a healthy hub (#7).
+	req.Header.Set("X-Device-Id", deviceID)
+	// Marks this as a diagnostic: the hub then neither records the device as
+	// seen nor overwrites the capabilities its real client declared, which would
+	// otherwise close the work_state gate every time doctor runs.
+	req.Header.Set(hub.ProbeHeader, "1")
 
 	resp, err := h.client.Do(req)
 	if err != nil {
@@ -44,9 +59,10 @@ func (h *httpHubClient) Status(ctx context.Context, url, userID, token string) (
 	}
 
 	var body struct {
-		Epoch        string `json:"epoch"`
-		HeadSeq      string `json:"head_seq"`
-		ProjectedSeq string `json:"projected_seq"`
+		Epoch        string   `json:"epoch"`
+		HeadSeq      string   `json:"head_seq"`
+		ProjectedSeq string   `json:"projected_seq"`
+		ContentKinds []string `json:"content_kinds"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return StatusResult{}, fmt.Errorf("hub response was not valid JSON: %w", err)
@@ -56,6 +72,7 @@ func (h *httpHubClient) Status(ctx context.Context, url, userID, token string) (
 		HeadSeq:      body.HeadSeq,
 		ProjectedSeq: body.ProjectedSeq,
 		SyncMode:     resp.Header.Get("X-Sync-Mode"),
+		ContentKinds: body.ContentKinds,
 	}, nil
 }
 

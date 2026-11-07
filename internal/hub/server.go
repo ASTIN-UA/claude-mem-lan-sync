@@ -13,6 +13,7 @@ import (
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/andrhamm/claude-mem-lan-sync/internal/proto"
@@ -71,7 +72,36 @@ type Options struct {
 	// exists. Until then the header stops every device retrying a 404 once a
 	// minute, forever.
 	WebSocketReady bool
+
+	// WorkState decides whether content_kinds lists work_state: "auto" (the
+	// default) lists it once every active device declared
+	// quarantine-unknown-kinds, the way the hosted hub does; "on" always lists
+	// it; "off" never does.
+	WorkState string
+
+	// ActiveDeviceWindow is how recently a device must have been seen to count
+	// for the work_state gate. Default 30 days.
+	ActiveDeviceWindow time.Duration
+
+	// RealtimeKey signs live-update channel tokens. Empty disables live
+	// updates: realtime-token answers 404 and clients keep polling.
+	RealtimeKey []byte
+
+	// MaxRealtimeConns bounds open live-update sockets.
+	MaxRealtimeConns int
 }
+
+// Work-state modes.
+const (
+	WorkStateAuto = "auto"
+	WorkStateOn   = "on"
+	WorkStateOff  = "off"
+)
+
+// ProbeHeader marks a cmemlan diagnostic request (doctor, status). The hub
+// then does not record the device: the probe sends no capabilities, and
+// storing that would close the work_state gate every time doctor runs.
+const ProbeHeader = "X-Cmemlan-Probe"
 
 func (o *Options) withDefaults() {
 	if o.Now == nil {
@@ -92,6 +122,15 @@ func (o *Options) withDefaults() {
 	if o.MaxInFlight <= 0 {
 		o.MaxInFlight = 64
 	}
+	if o.MaxRealtimeConns <= 0 {
+		o.MaxRealtimeConns = DefaultMaxRealtimeConns
+	}
+	if o.WorkState == "" {
+		o.WorkState = WorkStateAuto
+	}
+	if o.ActiveDeviceWindow <= 0 {
+		o.ActiveDeviceWindow = 30 * 24 * time.Hour
+	}
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -104,6 +143,11 @@ type Server struct {
 	inflight chan struct{}
 	pair     PairExchanger
 	recorder *Recorder
+
+	// workStateOpen remembers the last gate decision so a change is logged once.
+	workStateOpen atomic.Int32 // 0 unknown, 1 closed, 2 open
+
+	rt realtime
 }
 
 // PairExchanger redeems a pairing code for the pre-shared key. Supplied by the
@@ -158,6 +202,18 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 
 	case "/v1/sync/changes":
 		s.authed(w, r, http.MethodGet, s.handleChanges)
+
+	case "/v1/sync/realtime-token":
+		s.authed(w, r, http.MethodPost, s.handleRealtimeToken)
+
+	case RealtimePath:
+		s.handleRealtimeSocket(w, r)
+
+	case "/v1/sync/repair/head":
+		s.authed(w, r, http.MethodPost, s.handleRepairHead)
+
+	case "/v1/sync/repair":
+		s.authed(w, r, http.MethodPost, s.handleRepair)
 
 	case "/pair":
 		s.handlePair(w, r)

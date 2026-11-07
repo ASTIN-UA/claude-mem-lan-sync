@@ -86,14 +86,20 @@ func runDevices(args []string, env Env) int {
 	}
 
 	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "DEVICE ID\tNAME\tLAST SEEN\tSTATUS")
+	fmt.Fprintln(tw, "DEVICE ID\tNAME\tLAST SEEN\tSTATUS\tWORK_STATE")
 	for _, d := range devices {
 		status := "active"
 		if d.Revoked {
 			status = "revoked"
 		}
+		// Whether this device can receive work_state ops. One that cannot holds
+		// the hub's work_state gate shut while it is active.
+		ws := "ready"
+		if !store.HasCapability(d.Capabilities, store.CapabilityQuarantineUnknownKinds) {
+			ws = "needs claude-mem 13.29+"
+		}
 		// The name is attacker-supplied, so it is sanitised before display.
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", d.ID, sanitise(d.Name), d.LastSeen.Format(time.RFC3339), status)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", d.ID, sanitise(d.Name), d.LastSeen.Format(time.RFC3339), status, ws)
 	}
 	_ = tw.Flush()
 	return 0

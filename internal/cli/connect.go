@@ -21,6 +21,7 @@ const (
 	keyUserID     = "CLAUDE_MEM_CLOUD_SYNC_USER_ID"
 	keyDeviceName = "CLAUDE_MEM_CLOUD_SYNC_DEVICE_NAME"
 	keyWS         = "CLAUDE_MEM_CLOUD_SYNC_WS"
+	keyWorkerPort = "CLAUDE_MEM_WORKER_PORT"
 )
 
 func runConnect(args []string, env Env) int {
@@ -146,9 +147,10 @@ func runConnect(args []string, env Env) int {
 		keyToken:      resolvedToken,
 		keyUserID:     resolvedUser,
 		keyDeviceName: name,
-		// Belt and braces alongside the hub's X-Sync-Mode: poll header, so a
-		// device never hammers a WebSocket endpoint that does not exist yet.
-		keyWS: "false",
+		// Live updates. claude-mem 15.x asks the hub for realtime credentials
+		// and ignores X-Sync-Mode; older builds still see the hub's
+		// X-Sync-Mode: poll header and stay off the retired /v1/sync/ws.
+		keyWS: "true",
 	}
 
 	// CLAUDE_MEM_CLOUD_SYNC_DEVICE_ID is deliberately absent: claude-mem mints it

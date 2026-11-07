@@ -1,9 +1,11 @@
 # The claude-mem sync protocol
 
-Reverse-engineered from claude-mem **13.15.0** and verified end to end against a real worker. This
-is not a published specification; every claim here was checked against the client's own validators,
-and the ones marked **verified live** were additionally confirmed by driving a real worker against a
-hub.
+Reverse-engineered from claude-mem **13.15.0** and verified end to end against a real worker, then
+re-derived from the claude-mem **15.11.1** client source (`src/services/sync/CloudSync.ts`,
+`SyncClient.ts`, `CanonicalContent.ts`, `SyncConflictRecovery.ts`, `sync-capabilities.ts`) for the
+additions marked **15.x**. This is not a published specification; every claim here was checked
+against the client's own validators, and the ones marked **verified live** were additionally confirmed
+by driving a real worker against a hub.
 
 ## Endpoints
 
@@ -11,7 +13,11 @@ hub.
 GET  /v1/sync/status
 POST /v1/sync/ops
 GET  /v1/sync/changes?since=<seq>&limit=<n>
-GET  /v1/sync/ws                              (optional; see WebSocket below)
+GET  /v1/sync/ws                              (13.x only; not served — see X-Sync-Mode)
+POST /v1/sync/realtime-token                  (15.x live updates)
+GET  /realtime/v1/websocket                   (15.x live updates; Phoenix vsn 1.0.0)
+POST /v1/sync/repair/head                     (15.x conflict repair, origin-repair-v1)
+POST /v1/sync/repair                          (15.x conflict repair, origin-repair-v1)
 ```
 
 Every request carries:
@@ -21,7 +27,16 @@ Authorization: Bearer <token>
 X-User-Id: <user id>
 X-Device-Id: <uuid the client mints>
 X-Device-Name: <display name>          (falls back to the hostname, so effectively always present)
+X-Sync-Capabilities: quarantine-unknown-kinds      (15.x; claude-mem 13.29.0 and later)
 ```
+
+**15.x — `X-Sync-Capabilities`.** Sent on every hub request (status, push, pull, realtime-token).
+`quarantine-unknown-kinds` means a pulled op of a kind this build does not know is set aside in
+`sync_pull_quarantine` and the cursor moves past it. A build without the header (13.17.2, for one)
+validates the kind inside the page decoder (`kind must be observation, summary, or prompt`), throws,
+and retries that page forever. The hub stores the header per device (`devices.capabilities`, schema
+v2) on every non-probe request; an absent header is stored as NULL, so downgrading a machine closes
+the gate below again.
 
 **Verified live**: the exact header set above, `limit=500` on every pull, and `since=0` on a first
 sync.
@@ -105,10 +120,39 @@ A hub must therefore replace rather than reject, or it will 400 a body the clien
 ## `GET /v1/sync/status`
 
 ```json
-{"protocol_version":2,"epoch":"1","head_seq":"402","projected_seq":"402"}
+{"protocol_version":2,"epoch":"1","head_seq":"402","projected_seq":"402",
+ "content_kinds":["observation","summary","prompt","work_state"]}
 ```
 
 `epoch` must be a **positive decimal string** within uint64 — a UUID is rejected outright.
+
+**15.x — `content_kinds`.** `CloudSync.runHubStatusProbe` keeps the string entries of an array and
+treats a missing or non-array field as `[]` ("a hub that predates `content_kinds` accepts only the
+launch kinds"). `hubAcceptsKind` always allows the three launch kinds and allows `work_state` only
+when it is listed; rows of an unlisted kind wait unsynced (`heldUnsupportedKind` in the worker's
+`/api/sync/status`) and the client re-reads the status hourly while any wait.
+
+The hub lists `work_state` the way the hosted hub does: once **every active device** declared
+`quarantine-unknown-kinds`. Active means not revoked and seen within `--active-device-days` (30). No
+active device at all keeps it unlisted. `serve --work-state on|off` overrides the rule. A request
+carrying `X-Cmemlan-Probe: 1` (cmemlan's own `doctor` and `status`) is answered normally but never
+recorded, so diagnostics cannot close the gate.
+
+## `work_state` operations (15.x)
+
+claude-mem's to-do lists and the shared "My Work" records (`work_state_entries`). Same twelve-key
+envelope and digests as every content kind (`ENVELOPE_KEYS` is unchanged from 13.x). Specifics:
+
+- `id` is `stableDocumentId("work_state", origin_device_id, origin_local_id)`:
+  `"work_state:" + sha256_base64url(canonicalJson(["cmem-doc-id-v1","device","work_state",<device>,<local id>]))`.
+- `origin_local_id` is the decimal row id; `entity_rev` the row's `sync_rev`.
+- `payload` has exactly `created_at`, `created_at_epoch` (decimal string), `fields` (an object whose
+  values are strings, finite numbers, booleans or null), `list_name`, `project`.
+- Rows whose `list_name` matches `__my_work_v<N>:*` are pushed only when the sending machine has
+  `CLAUDE_MEM_WORK_VIEW_SHARED_STATE=true`; other lists always sync once the hub lists the kind.
+
+The hub accepts `work_state` in `/v1/sync/ops` unconditionally, gate open or not: a push already in
+flight when the gate closes must land, because a 400 parks the op at the head of the outbox forever.
 
 ## `POST /v1/sync/ops`
 
@@ -177,28 +221,117 @@ rejecting a value it will simply repeat would stall its pulls for no benefit.
 
 ## `X-Sync-Mode`
 
-`X-Sync-Mode: poll` means "do not attempt the WebSocket": the client closes any socket and suppresses
-reconnects. Any other value, **including an absent header**, re-enables it.
+`X-Sync-Mode: poll` is aimed at **13.x clients**: it means "do not attempt the `/v1/sync/ws`
+WebSocket", so they close any socket and suppress reconnects. Any other value, including an absent
+header, re-enables it, and those clients retry a 404 once a minute forever — so the hub keeps sending
+`poll` on every response. claude-mem **15.x ignores the header** (SyncClient.ts: "deliberately
+ignored here: it must never disable Realtime") and uses the live channel below instead.
 
-The client enables WebSockets by default and reconnects with a backoff capped at 60s, so a hub
-without `/v1/sync/ws` must send this header or every device retries a 404 once a minute forever.
+**Verified live (13.15.0):** the client logs *"Hub is in poll mode (X-Sync-Mode: poll) — socket
+closed, reconnects suppressed, HTTP sync continues"*.
 
-**Verified live:** the client logs *"Hub is in poll mode (X-Sync-Mode: poll) — socket closed,
-reconnects suppressed, HTTP sync continues"*.
+## Live updates (15.x)
 
-## WebSocket (not implemented here)
+Read from `SyncClient.ts` (`fetchRealtimeGrant`, `handleSocketOpen`, `handleSocketMessage`,
+`handleBroadcast`, `refreshRealtimeToken`). The hosted hub uses Supabase Realtime; the client speaks
+its Phoenix protocol (vsn 1.0.0) with no npm client, so this hub implements just that surface. The
+channel is **advisory**: it carries only "the log grew", and the client answers with its ordinary
+HTTP pull. Nothing durable rides it, and a lost frame costs at most one poll interval.
 
-Recorded for whoever adds it. URL is `hubUrl.replace(/^http/i,"ws") + "/v1/sync/ws"`, authenticated
-from the upgrade request alone with the same four headers. Text frames only; a binary frame throws.
+Enabled when the client has `CLAUDE_MEM_CLOUD_SYNC_WS` unset or anything but `false`.
 
-- `{"type":"advance","head_seq":"<decimal string>"}` → the client force-pulls over HTTP.
-- `{"type":"op","ops":[<change records>]}` → must be internally contiguous and start at ≤ cursor+1.
+### `POST /v1/sync/realtime-token`
 
-An optional `epoch` on any frame must match the client's stored epoch. The client pings every 40s and
-never checks for a pong.
+Authenticated like every protocol route; no body. Response (all five fields required, `expires_at`
+a JSON **number** of unix seconds, `realtime_url` `ws://` or `wss://`, `topic` without a prefix):
 
-**Recommendation: implement `advance` only.** It carries no data-loss risk, and the client pulls over
-HTTP anyway. HTTP-only operation is genuinely lossless.
+```json
+{"access_token":"<opaque>","expires_at":1794067200,"realtime_url":"ws://192.168.1.10:8787/realtime/v1/websocket",
+ "apikey":"cmemlan","topic":"user:<user id>"}
+```
+
+The client appends `apikey` and `vsn=1.0.0` to the URL and joins `realtime:<topic>`. 404 means
+"no Realtime here": it stays on polling and re-probes hourly; 401/403 enter its auth pause. It
+re-mints at ~80 % of the lifetime (tokens here live an hour). The token is an HMAC over
+(user, device, expiry) keyed from the pre-shared key, so rotating the key invalidates every token.
+
+### Socket
+
+`new WebSocket(url)`: **no auth headers**, so the upgrade is unauthenticated and the channel join is
+the check. Text frames, JSON objects `{topic, event, payload, ref, join_ref}`.
+
+| client sends | hub answers |
+|---|---|
+| `phx_join` on `realtime:user:<id>`, `payload.access_token` | `phx_reply` `{status:"ok",response:{}}` with the same `ref`/`join_ref`; `status:"error"` for a bad, expired or revoked token or another user's topic |
+| `heartbeat` on topic `phoenix`, every ≤ 25 s | `phx_reply` `{status:"ok"}` with the same `ref` (an unanswered beat makes the client reconnect) |
+| `access_token` with a fresh token | `phx_reply` ok; a token for another device ends the socket |
+| `phx_leave` | `phx_reply` ok |
+
+The hub sends, after every push and every accepted repair, to joined sockets of **other** devices:
+
+```json
+{"topic":"realtime:user:<id>","event":"broadcast","ref":null,
+ "payload":{"type":"broadcast","event":"advance","payload":{"epoch":"<epoch>","head_seq":"<head>"}}}
+```
+
+Both values are decimal strings. A different epoch makes the client drop the socket and pull over
+HTTP (which resets its cursor). A token that expired without a refresh is answered on the next
+heartbeat with `{"event":"system","payload":{"status":"error","message":"Token has expired"}}` and
+the socket is closed; the client reconnects with fresh credentials. On join the client always runs
+one catch-up pull, so advances missed while disconnected cost nothing.
+
+Sockets do not use the request concurrency slots; they have their own cap (64). The server's
+read/write timeouts are replaced by a 75 s read deadline (refreshed by each frame) and a 10 s
+per-write deadline. A socket too slow to take an advance is dropped.
+
+## Conflict repair, `origin-repair-v1` (15.x)
+
+Read from `SyncConflictRecovery.ts` and `docs/development/viewer-sync-recovery.md`. A device that
+owns an entity (the op's `origin_device_id` equals its `X-Device-Id`) can append a strictly newer
+revision of its own native row, conditioned on the hub's head and epoch it reviewed. Requests carry
+`Authorization`, `X-User-Id`, `X-Device-Id` and `Content-Type: application/json` only — **no**
+`X-Sync-Capabilities` and no device name — so the hub does not record the device on these routes
+(recording them would close the work_state gate). Any non-200 aborts that one repair; 404 means
+`repair_capability_unavailable`.
+
+### `POST /v1/sync/repair/head`
+
+Request `{"entity_id":"<id>"}`. Response:
+
+```json
+{"protocol_version":1,"capability":"origin-repair-v1","epoch":"…","head_seq":"…","projected_seq":"…",
+ "entity_id":"<id>","head":{"entity_rev":"…","operation_sha256":"…","seq":"…"},"op":{"body":"…","operation_sha256":"…"}}
+```
+
+`head` and `op` are both `null` when the log has no revision of the entity. Otherwise they describe
+the entity's **highest `entity_rev`** (not the latest seq), and `op` is the stored wrapper with the
+body literal byte for byte, as on `/v1/sync/changes`. The client checks that the op's id, origin
+and revision match `head`.
+
+### `POST /v1/sync/repair`
+
+Request `{"repair_id":"<32 hex>","expected_epoch":"…","expected_head":null|{entity_rev,operation_sha256,seq},"op":{body,operation_sha256}}`.
+The op is validated exactly like a pushed one. In one write transaction the hub:
+
+1. answers an exact retry (same `repair_id`, same entity, revision and digest) from its receipt with
+   the original ack, even though the head has since become that op; a reused id with a different op
+   is 409;
+2. refuses with 403 an op whose origin is not the requesting device;
+3. refuses with 409 a changed epoch, a head that is not exactly `expected_head` (including
+   "expected none, one exists"), or a revision not strictly above the head's;
+4. appends the op at the next seq, records the receipt (`repairs`, schema v2), and announces the
+   new head on the live channel.
+
+Response:
+
+```json
+{"protocol_version":1,"capability":"origin-repair-v1","epoch":"…","acked":[{"id":"…","kind":"…",
+ "entity_rev":"…","operation_sha256":"…","seq":"…","origin_local_id":"…"}],"head_seq":"…","projected_seq":"…"}
+```
+
+The client requires exactly one ack matching its op and `seq ≤ head_seq = projected_seq`. Nothing is
+ever rewritten: the conflicting revisions stay in the log, and the repair is simply the newest one.
+Mutations cannot be repaired (400).
 
 ## Client-side mechanics worth knowing
 

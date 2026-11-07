@@ -25,6 +25,9 @@ const (
 	ReasonBadRequest      RejectReason = "bad_request"
 	ReasonOverloaded      RejectReason = "overloaded"
 	ReasonInternal        RejectReason = "internal"
+	// ReasonConflict: a conditional write (conflict repair) found the epoch or
+	// the entity head changed since the client read it.
+	ReasonConflict RejectReason = "conflict"
 )
 
 // RejectError carries a reason and, by construction, nothing else. The struct

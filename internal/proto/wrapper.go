@@ -54,12 +54,26 @@ type Ack struct {
 // mutation is a real fourth kind with its own validation branch in the client
 // (set_title, set_prompt_session, remap_project). Omitting it from this set
 // would 400 every project rename, and a 400 blocks that device's outbox forever.
+//
+// work_state (claude-mem's to-do lists and "My Work", CanonicalContent.ts) is
+// accepted unconditionally. A client pushes it only after the hub listed it in
+// content_kinds, but a push already in flight when the gate closes must still
+// land: refusing it would park that op at the head of the outbox for good.
 var validKinds = map[string]bool{
 	"observation": true,
 	"summary":     true,
 	"prompt":      true,
+	"work_state":  true,
 	"mutation":    true,
 }
+
+// LaunchContentKinds are the kinds every claude-mem build understands. A client
+// that predates content_kinds assumes exactly these.
+var LaunchContentKinds = []string{"observation", "summary", "prompt"}
+
+// KindWorkState is advertised in content_kinds only while every active device
+// can set aside a kind it does not know.
+const KindWorkState = "work_state"
 
 // bodyKeys is the exact key set of an operation body.
 var bodyKeys = []string{

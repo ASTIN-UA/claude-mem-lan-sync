@@ -10,7 +10,7 @@ import (
 // A binary refuses to open a database stamped higher than this: an older build
 // silently misreading a newer schema is a corruption path, and this hub holds
 // the only copy of any op whose origin device has since pruned it.
-const schemaVersion = 1
+const schemaVersion = 2
 
 const schemaV1 = `
 CREATE TABLE ops (
@@ -45,6 +45,29 @@ CREATE TABLE devices (
 );
 `
 
+// schemaV2 remembers what each device declared in X-Sync-Capabilities. NULL
+// means it never declared anything, which is how claude-mem before 13.29.0
+// looks: such a device cannot set aside an op kind it does not know.
+//
+// It also adds the conflict-repair receipts: one row per accepted
+// /v1/sync/repair, so an exact retry after a lost response is answered with the
+// same acknowledgement instead of appending twice.
+const schemaV2 = `
+ALTER TABLE devices ADD COLUMN capabilities TEXT;
+
+CREATE TABLE repairs (
+  user_id          TEXT    NOT NULL,
+  repair_id        TEXT    NOT NULL,
+  entity_id        TEXT    NOT NULL,
+  entity_rev       TEXT    NOT NULL,
+  operation_sha256 TEXT    NOT NULL,
+  seq              INTEGER NOT NULL,
+  device_id        TEXT    NOT NULL,
+  created_at       INTEGER NOT NULL,
+  PRIMARY KEY (user_id, repair_id)
+);
+`
+
 func migrate(db *sql.DB) error {
 	var current int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&current); err != nil {
@@ -69,6 +92,11 @@ func migrate(db *sql.DB) error {
 	if current < 1 {
 		if _, err := tx.Exec(schemaV1); err != nil {
 			return fmt.Errorf("store: applying schema v1: %w", err)
+		}
+	}
+	if current < 2 {
+		if _, err := tx.Exec(schemaV2); err != nil {
+			return fmt.Errorf("store: applying schema v2: %w", err)
 		}
 	}
 

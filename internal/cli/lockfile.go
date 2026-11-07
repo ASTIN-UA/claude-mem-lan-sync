@@ -7,7 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
+
+	"github.com/andrhamm/claude-mem-lan-sync/internal/clientdb"
 )
 
 // LockFile is the filename used to keep two serve processes apart.
@@ -56,20 +57,7 @@ func Lockfile(dir string) (release func() error, err error) {
 	return Lockfile(dir)
 }
 
-// processAlive reports whether a pid is running. Signal 0 performs the
-// permission and existence checks without delivering anything.
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = p.Signal(syscall.Signal(0))
-	if err == nil {
-		return true
-	}
-	// EPERM means it exists but belongs to someone else.
-	return errors.Is(err, os.ErrPermission)
-}
+// processAlive reports whether a pid is running. On Windows the signal-0 probe
+// this used to make always failed, so a second serve silently took over a data
+// directory that a running hub held.
+func processAlive(pid int) bool { return clientdb.ProcessAlive(pid) }

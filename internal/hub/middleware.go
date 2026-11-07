@@ -95,6 +95,12 @@ func (s *Server) authed(w http.ResponseWriter, r *http.Request, method string, h
 		return
 	}
 
+	// Recorded before the handler runs, so a status request already counts the
+	// capabilities it carries when the work_state gate is decided.
+	if r.Header.Get(ProbeHeader) == "" && !isRepairPath(r.URL.Path) {
+		s.recordDevice(r)
+	}
+
 	h(w, r)
 }
 
@@ -113,7 +119,10 @@ func bearerToken(r *http.Request) string {
 // else is talking to us — including a page loaded in a browser on this machine.
 func (s *Server) checkHostAndOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Origin") != "" {
+		// The live-update socket is authenticated by its channel join token,
+		// not by headers, so an Origin there gains nothing; a WebSocket client
+		// may send one.
+		if r.Header.Get("Origin") != "" && r.URL.Path != RealtimePath {
 			s.writeError(w, http.StatusBadRequest, proto.ReasonBadRequest)
 			return
 		}
@@ -153,6 +162,12 @@ func (s *Server) hostAllowed(host string) bool {
 // or connections.
 func (s *Server) limitInFlight(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A live-update socket is held for hours; it has its own cap
+		// (MaxRealtimeConns) and must not use up the request slots.
+		if r.URL.Path == RealtimePath {
+			next.ServeHTTP(w, r)
+			return
+		}
 		select {
 		case s.inflight <- struct{}{}:
 			defer func() { <-s.inflight }()
