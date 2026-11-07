@@ -21,10 +21,12 @@ type fakeHub struct {
 	result StatusResult
 	err    error
 	calls  int
+	device string
 }
 
-func (f *fakeHub) Status(_ context.Context, _, _, _ string) (StatusResult, error) {
+func (f *fakeHub) Status(_ context.Context, _, _, _, deviceID string) (StatusResult, error) {
 	f.calls++
+	f.device = deviceID
 	return f.result, f.err
 }
 
@@ -114,6 +116,10 @@ func TestDoctorHealthyReportsHubState(t *testing.T) {
 	}
 	if hub.calls != 1 {
 		t.Fatalf("doctor made %d hub calls, want 1", hub.calls)
+	}
+	// Issue #7: the probe must carry this machine's device id.
+	if hub.device != "94a3962b-daef-44c7-9475-a0eb978f4a19" {
+		t.Errorf("doctor probed with device id %q", hub.device)
 	}
 	for _, want := range []string{"hub reachable", "epoch 7", "head 42", "websocket disabled"} {
 		if !strings.Contains(stdout, want) {

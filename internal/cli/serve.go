@@ -39,6 +39,8 @@ type serveFlags struct {
 	install     bool
 	uninstall   bool
 	recordDir   string
+	workState   string
+	activeDays  int
 }
 
 func runServe(args []string, env Env) int {
@@ -59,8 +61,22 @@ func runServe(args []string, env Env) int {
 	fs.BoolVar(&f.install, "install-service", false, "install and start a user service")
 	fs.BoolVar(&f.uninstall, "uninstall-service", false, "stop and remove the user service")
 	fs.StringVar(&f.recordDir, "record", "", "capture traffic into this directory (local development only)")
+	fs.StringVar(&f.workState, "work-state", hub.WorkStateAuto,
+		"list work_state in content_kinds: auto (once every active device can set aside unknown kinds), on, off")
+	fs.IntVar(&f.activeDays, "active-device-days", 30, "a device seen within this many days counts for the work_state gate")
 
 	if _, err := parseFlags(fs, args); err != nil {
+		return 2
+	}
+
+	switch f.workState {
+	case hub.WorkStateAuto, hub.WorkStateOn, hub.WorkStateOff:
+	default:
+		fmt.Fprintln(env.Stderr, "cmemlan: --work-state must be auto, on, or off")
+		return 2
+	}
+	if f.activeDays <= 0 {
+		fmt.Fprintln(env.Stderr, "cmemlan: --active-device-days must be positive")
 		return 2
 	}
 
@@ -136,6 +152,9 @@ func runServe(args []string, env Env) int {
 		Logger:       log,
 		MinFreeBytes: f.minFree,
 		FreeBytes:    func() (int64, error) { return freeBytes(dataDir) },
+
+		WorkState:          f.workState,
+		ActiveDeviceWindow: time.Duration(f.activeDays) * 24 * time.Hour,
 	})
 	// The pairing window lives in a file so `cmemlan pair` — a separate process —
 	// can open one against a hub that is already running.

@@ -9,13 +9,11 @@ package clientdb
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 
 	_ "modernc.org/sqlite"
 )
@@ -42,10 +40,13 @@ type Counts struct {
 	Observations int
 	Summaries    int
 	Prompts      int
+	// WorkState is claude-mem's to-do lists (work_state_entries, 14.x and
+	// later). Zero on a database that has no such table.
+	WorkState int
 }
 
 // Total is the number of rows waiting to upload.
-func (c Counts) Total() int { return c.Observations + c.Summaries + c.Prompts }
+func (c Counts) Total() int { return c.Observations + c.Summaries + c.Prompts + c.WorkState }
 
 // Open opens claude-mem's database.
 func Open(path string) (*DB, error) {
@@ -76,6 +77,16 @@ func (d *DB) Pending() (Counts, error) {
 			`SELECT COUNT(*) FROM %s WHERE synced_at IS NULL AND origin_device_id IS NULL`, t.Table)
 		if err := d.db.QueryRow(q).Scan(targets[i]); err != nil {
 			return Counts{}, fmt.Errorf("clientdb: counting %s: %w", t.Table, err)
+		}
+	}
+	// work_state is not in syncTables on purpose: backfill must not touch it.
+	var hasWorkState int
+	if err := d.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'work_state_entries'`,
+	).Scan(&hasWorkState); err == nil && hasWorkState == 1 {
+		if err := d.db.QueryRow(`SELECT COUNT(*) FROM work_state_entries
+			WHERE synced_at IS NULL AND origin_device_id IS NULL`).Scan(&c.WorkState); err != nil {
+			return Counts{}, fmt.Errorf("clientdb: counting work_state_entries: %w", err)
 		}
 	}
 	return c, nil
@@ -124,19 +135,6 @@ func WorkerPID(dir string) (int, bool) {
 		return 0, false
 	}
 	return pid, true
-}
-
-// ProcessAlive reports whether a pid is running.
-func ProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = p.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, os.ErrPermission)
 }
 
 // WorkerRunning reports whether claude-mem's worker holds this data directory.

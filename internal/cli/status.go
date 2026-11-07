@@ -3,6 +3,8 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/andrhamm/claude-mem-lan-sync/internal/clientdb"
 	"github.com/andrhamm/claude-mem-lan-sync/internal/paths"
@@ -49,8 +51,10 @@ func runStatus(args []string, env Env) int {
 				fmt.Fprintf(env.Stdout, "  observations  %d\n", counts.Observations)
 				fmt.Fprintf(env.Stdout, "  summaries     %d\n", counts.Summaries)
 				fmt.Fprintf(env.Stdout, "  prompts       %d\n", counts.Prompts)
+				fmt.Fprintf(env.Stdout, "  work_state    %d\n", counts.WorkState)
 			}
-			if db.WorkerRunning() {
+			memDir := filepath.Dir(dbPath)
+			if _, up := probeWorker(workerPort(memDir, settings.Value(current, keyWorkerPort))); up || db.WorkerRunning() {
 				fmt.Fprintln(env.Stdout, "\nworker     running")
 			} else {
 				fmt.Fprintln(env.Stdout, "\nworker     not running (nothing will sync)")
@@ -61,12 +65,15 @@ func runStatus(args []string, env Env) int {
 	ctx, cancel := env.ctx()
 	defer cancel()
 
-	res, err := env.hub().Status(ctx, hubURL, userID, token)
+	res, err := env.hub().Status(ctx, hubURL, userID, token, settings.Value(current, settings.DeviceIDKey))
 	if err != nil {
 		fmt.Fprintf(env.Stdout, "\nhub        unreachable — %v\n", err)
 		fmt.Fprintln(env.Stdout, "Queued memories are safe locally and will upload when the hub returns.")
 		return 1
 	}
 	fmt.Fprintf(env.Stdout, "\nhub epoch  %s\nhub head   %s\n", res.Epoch, res.HeadSeq)
+	if res.ContentKinds != nil {
+		fmt.Fprintf(env.Stdout, "hub kinds  %s\n", strings.Join(res.ContentKinds, ", "))
+	}
 	return 0
 }

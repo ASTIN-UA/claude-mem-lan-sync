@@ -10,7 +10,7 @@ var Version = "dev"
 
 // TestedClaudeMem is the claude-mem release this build's protocol behaviour was
 // verified against. doctor warns when the installed version differs.
-const TestedClaudeMem = "13.15.0"
+const TestedClaudeMem = "15.11.1"
 
 // String renders the version for the `version` command.
 func String() string {

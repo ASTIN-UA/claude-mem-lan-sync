@@ -21,11 +21,16 @@ type StatusResult struct {
 	HeadSeq      string
 	ProjectedSeq string
 	SyncMode     string
+	// ContentKinds is the hub's `content_kinds`; nil when the hub predates it.
+	ContentKinds []string
 }
 
 // HubClient talks to a hub. Injected so doctor can be tested against a fake.
 type HubClient interface {
-	Status(ctx context.Context, url, userID, token string) (StatusResult, error)
+	// deviceID is this machine's claude-mem device id. The hub refuses any
+	// protocol request without one (issue #7), so an empty id falls back to
+	// ProbeDeviceID.
+	Status(ctx context.Context, url, userID, token, deviceID string) (StatusResult, error)
 }
 
 // Env carries everything a command needs from the outside world.

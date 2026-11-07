@@ -21,6 +21,7 @@ const (
 	keyUserID     = "CLAUDE_MEM_CLOUD_SYNC_USER_ID"
 	keyDeviceName = "CLAUDE_MEM_CLOUD_SYNC_DEVICE_NAME"
 	keyWS         = "CLAUDE_MEM_CLOUD_SYNC_WS"
+	keyWorkerPort = "CLAUDE_MEM_WORKER_PORT"
 )
 
 func runConnect(args []string, env Env) int {

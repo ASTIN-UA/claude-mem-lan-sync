@@ -166,6 +166,27 @@ func runService(f serveFlags, dataDir string, env Env) int {
 		fmt.Fprintf(env.Stdout, "agent installed and started (%s)\n", path)
 		return 0
 
+	case "windows":
+		script := windowsTaskScript(exe, dataDir, f.bind, f.allowCIDR)
+		if f.uninstall {
+			script = windowsTaskRemoveScript()
+		}
+		if f.printUnit {
+			fmt.Fprint(env.Stdout, script)
+			return 0
+		}
+		cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive",
+			"-ExecutionPolicy", "Bypass", "-Command", "-")
+		cmd.Stdin = strings.NewReader(script)
+		out, err := cmd.CombinedOutput()
+		fmt.Fprint(env.Stdout, string(out))
+		if err != nil {
+			fmt.Fprintf(env.Stderr, "cmemlan: registering the scheduled task: %v\n"+
+				"Run this from an elevated PowerShell, or save the script with --print-unit and run it there.\n", err)
+			return 1
+		}
+		return 0
+
 	default:
 		fmt.Fprintf(env.Stderr, "cmemlan: service installation is not supported on %s\n", runtime.GOOS)
 		return 1
