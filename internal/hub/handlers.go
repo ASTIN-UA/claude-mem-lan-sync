@@ -126,6 +126,12 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	buf.WriteString(`"}`)
 
 	s.writeJSON(w, &buf)
+
+	// Live update for the other devices. A push of duplicates announces a head
+	// they already have; the client compares it to its cursor and does nothing.
+	if len(ops) > 0 {
+		s.announceAdvance(res.HeadSeq, r.Header.Get("X-Device-Id"))
+	}
 }
 
 func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {

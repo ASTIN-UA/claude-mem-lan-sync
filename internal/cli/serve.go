@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -153,6 +154,10 @@ func runServe(args []string, env Env) int {
 		MinFreeBytes: f.minFree,
 		FreeBytes:    func() (int64, error) { return freeBytes(dataDir) },
 
+		// Derived from the pre-shared key, so rotating it also invalidates every
+		// live-update token.
+		RealtimeKey: realtimeKey(keys.PSK),
+
 		WorkState:          f.workState,
 		ActiveDeviceWindow: time.Duration(f.activeDays) * 24 * time.Hour,
 	})
@@ -225,6 +230,7 @@ func runServe(args []string, env Env) int {
 	// checkpoints and truncates the write-ahead log.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	srv.CloseRealtime()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		log.Warn("graceful shutdown did not complete", "error", err)
 	}
@@ -237,4 +243,10 @@ func cmp(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// realtimeKey derives the live-update signing key from the pre-shared key.
+func realtimeKey(psk string) []byte {
+	sum := sha256.Sum256([]byte("cmemlan-realtime-v1\x00" + psk))
+	return sum[:]
 }
